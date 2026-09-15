@@ -7,11 +7,11 @@ from radarsim.config import RadarConfig
 from radarsim.models import SignalCube
 
 
-def _repetition_time(
+def _repetition_timing(
     times: NDArray[np.float64], interval: float, width: float,
     slow_count: int, frame_count: int, sample_rate: float,
-) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
-    """Map absolute queries to a finite train of rectangular chirps.
+) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.intp], NDArray[np.bool_]]:
+    """Map absolute queries to local time, active support, and repetition index.
 
     Nominal boundaries use n * interval, the frame/slow-time sum in build_tx,
     or integer sample ticks / sample_rate when the timing fits that clock.
@@ -43,6 +43,17 @@ def _repetition_time(
     if on_clock:
         at_end |= bounded == (repetition * interval_ticks + width_ticks) / sample_rate
     active = valid & ~at_end & (local >= 0) & (local < width)
+    return local, active, repetition.astype(np.intp), valid
+
+
+def _repetition_time(
+    times: NDArray[np.float64], interval: float, width: float,
+    slow_count: int, frame_count: int, sample_rate: float,
+) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    """Return local time and support using the shared repetition timing map."""
+    local, active, _, _ = _repetition_timing(
+        times, interval, width, slow_count, frame_count, sample_rate,
+    )
     return local, active
 
 
@@ -55,5 +66,9 @@ class Waveform(Protocol):
     def build_tx(self, radar: RadarConfig) -> SignalCube: ...
 
     def sample_at(self, times_s: NDArray[np.float64]) -> NDArray[np.complex128]: ...
+
+    def _timing_at(self, times_s: NDArray[np.float64]) -> tuple[
+        NDArray[np.float64], NDArray[np.bool_], NDArray[np.intp], NDArray[np.bool_],
+    ]: ...
 
     def reference(self) -> NDArray[np.complex128]: ...

@@ -6,7 +6,7 @@ from numpy.typing import NDArray
 
 from radarsim.config import RadarConfig
 from radarsim.models import SignalCube
-from .base import _repetition_time
+from .base import _repetition_timing
 
 
 @dataclass(frozen=True)
@@ -49,12 +49,18 @@ class LFMWaveform:
         self.frame_count = config.frame_count
         self.repetition_interval_s = config.pulse_repetition_interval_s
 
-    def sample_at(self, times_s: NDArray[np.float64]) -> NDArray[np.complex128]:
+    def _timing_at(self, times_s: NDArray[np.float64]) -> tuple[
+        NDArray[np.float64], NDArray[np.bool_], NDArray[np.intp], NDArray[np.bool_],
+    ]:
         times = np.asarray(times_s, dtype=float)
-        local, active = _repetition_time(
+        return _repetition_timing(
             times, self.repetition_interval_s, self.config.pulse_width_s,
             self.slow_time_count, self.frame_count, self.sample_rate_hz,
         )
+
+    def sample_at(self, times_s: NDArray[np.float64]) -> NDArray[np.complex128]:
+        times = np.asarray(times_s, dtype=float)
+        local, active, _, _ = self._timing_at(times)
         out = np.zeros(times.shape, dtype=np.complex128)
         out[active] = np.exp(1j * np.pi * self.config.slope_hz_per_s * local[active] ** 2)
         return out
