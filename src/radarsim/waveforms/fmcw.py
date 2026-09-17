@@ -85,5 +85,9 @@ class FMCWWaveform:
             times,
             {"waveform_kind": "fmcw", "sample_rate_hz": self.sample_rate_hz,
              "slope_hz_per_s": self.config.slope_hz_per_s,
+             "bandwidth_hz": self.config.bandwidth_hz,
+             "chirp_duration_s": self.config.chirp_duration_s,
+             "chirps_per_frame": self.slow_time_count,
+             "frame_count": self.frame_count,
              "repetition_interval_s": self.repetition_interval_s},
         )
