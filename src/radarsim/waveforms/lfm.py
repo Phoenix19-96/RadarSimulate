@@ -88,6 +88,10 @@ class LFMWaveform:
             slow,
             times,
             {"waveform_kind": "lfm", "sample_rate_hz": self.sample_rate_hz,
+             "bandwidth_hz": self.config.bandwidth_hz,
+             "pulse_width_s": self.config.pulse_width_s,
              "slope_hz_per_s": self.config.slope_hz_per_s,
-             "repetition_interval_s": self.repetition_interval_s},
+             "repetition_interval_s": self.repetition_interval_s,
+             "pulses_per_frame": self.slow_time_count,
+             "frame_count": self.frame_count},
         )

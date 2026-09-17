@@ -29,3 +29,23 @@ class SignalCube:
             raise ValueError("slow_time_s length must match data")
         if self.sample_times_s.shape != (frames, slow, fast):
             raise ValueError("sample_times_s shape must be [frame, slow_time, fast_time]")
+
+
+@dataclass(frozen=True, eq=False)
+class LFMFrontendResult:
+    received: SignalCube
+    matched_filter_reference: NDArray[np.complex128]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.received, SignalCube) or self.received.dimensions != ("frame", "slow_time", "rx", "fast_time"):
+            raise ValueError("received must be an Rx SignalCube")
+        reference = np.asarray(self.matched_filter_reference)
+        if reference.ndim != 1 or reference.size == 0:
+            raise ValueError("matched_filter_reference must be a non-empty one-dimensional array")
+        if not np.iscomplexobj(reference):
+            raise ValueError("matched_filter_reference must be complex")
+        if not np.all(np.isfinite(reference.real)) or not np.all(np.isfinite(reference.imag)):
+            raise ValueError("matched_filter_reference must be finite")
+        frozen = np.array(reference, dtype=np.complex128, copy=True)
+        frozen.setflags(write=False)
+        object.__setattr__(self, "matched_filter_reference", frozen)
