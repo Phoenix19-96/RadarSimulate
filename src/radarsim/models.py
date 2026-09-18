@@ -103,3 +103,52 @@ class RangeDopplerResult:
             copied = np.array(value, dtype=dtype, copy=True)
             copied.setflags(write=False)
             object.__setattr__(self, name, copied)
+
+
+@dataclass(frozen=True, eq=False)
+class CFARResult:
+    detections: NDArray[np.bool_]
+    threshold_w: NDArray[np.float64]
+    noise_w: NDArray[np.float64]
+
+    def __post_init__(self) -> None:
+        detections = np.asarray(self.detections)
+        threshold = np.asarray(self.threshold_w)
+        noise = np.asarray(self.noise_w)
+        if detections.ndim != 2 or detections.dtype != np.bool_:
+            raise ValueError("detections must be a two-dimensional boolean array")
+        if threshold.shape != detections.shape or noise.shape != detections.shape:
+            raise ValueError("CFAR maps must have matching two-dimensional shapes")
+        if not np.all(np.isfinite(threshold) | np.isnan(threshold)) or not np.all(np.isfinite(noise) | np.isnan(noise)):
+            raise ValueError("CFAR maps may contain only finite values or NaN for invalid cells")
+        if np.any(threshold[np.isfinite(threshold)] < 0) or np.any(noise[np.isfinite(noise)] < 0):
+            raise ValueError("CFAR maps must be non-negative")
+        for name, value, dtype in (("detections", detections, np.bool_), ("threshold_w", threshold, np.float64), ("noise_w", noise, np.float64)):
+            copied = np.array(value, dtype=dtype, copy=True)
+            copied.setflags(write=False)
+            object.__setattr__(self, name, copied)
+
+
+@dataclass(frozen=True)
+class Detection:
+    frame_index: int
+    channel_index: int
+    range_m: float
+    velocity_mps: float
+    power_w: float
+    noise_w: float
+    snr_db: float
+    doppler_index: int = 0
+    range_index: int = 0
+
+    @property
+    def rx_index(self) -> int:
+        return self.channel_index
+
+    @property
+    def doppler_bin_index(self) -> int:
+        return self.doppler_index
+
+    @property
+    def range_bin_index(self) -> int:
+        return self.range_index
