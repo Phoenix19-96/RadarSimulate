@@ -244,3 +244,11 @@ def run_simulation(config: ExperimentConfig) -> SimulationResult:
     return SimulationResult(
         tx, rx, frontend, range_doppler, cfar, detections, truth,
     )
+
+
+def run_and_save(config: ExperimentConfig, output):
+    """Run the pure simulation, then explicitly persist its artifacts."""
+    from .output import save_simulation
+
+    result = run_simulation(config)
+    return result, save_simulation(result, config, output)
