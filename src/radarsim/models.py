@@ -152,3 +152,76 @@ class Detection:
     @property
     def range_bin_index(self) -> int:
         return self.range_index
+
+
+@dataclass(frozen=True)
+class TruthRecord:
+    frame_index: int
+    target_id: str
+    time_s: float
+    x_m: float
+    y_m: float
+    z_m: float
+    range_m: float
+    radial_velocity_mps: float
+    azimuth_deg: float
+    elevation_deg: float
+    rcs_dbsm: float
+
+
+@dataclass(frozen=True)
+class SimulationResult:
+    tx: SignalCube
+    rx: SignalCube
+    frontend: SignalCube | LFMFrontendResult
+    range_doppler: RangeDopplerResult
+    cfar: tuple[tuple[CFARResult, ...], ...]
+    detections: tuple[Detection, ...]
+    truth: tuple[TruthRecord, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tx, SignalCube) or self.tx.dimensions != (
+            "frame", "slow_time", "tx", "fast_time",
+        ):
+            raise ValueError("tx must be a Tx SignalCube")
+        if not isinstance(self.rx, SignalCube) or self.rx.dimensions != (
+            "frame", "slow_time", "rx", "fast_time",
+        ):
+            raise ValueError("rx must be an Rx SignalCube")
+        if (self.tx.data.shape[0], self.tx.data.shape[1], self.tx.data.shape[3]) != (
+            self.rx.data.shape[0], self.rx.data.shape[1], self.rx.data.shape[3],
+        ):
+            raise ValueError("tx and rx frame, slow-time, and fast-time shapes must match")
+        frontend_rx = (
+            self.frontend if isinstance(self.frontend, SignalCube)
+            else self.frontend.received if isinstance(self.frontend, LFMFrontendResult)
+            else None
+        )
+        if frontend_rx is None or frontend_rx.dimensions != (
+            "frame", "slow_time", "rx", "fast_time",
+        ):
+            raise ValueError("frontend must retain an Rx SignalCube")
+        if (frontend_rx.data.shape != self.rx.data.shape
+                or not np.array_equal(frontend_rx.fast_time_s, self.rx.fast_time_s)
+                or not np.array_equal(frontend_rx.slow_time_s, self.rx.slow_time_s)
+                or not np.array_equal(frontend_rx.sample_times_s, self.rx.sample_times_s)):
+            raise ValueError("frontend axes and shape must match rx")
+        if (isinstance(self.frontend, LFMFrontendResult)
+                and not np.array_equal(frontend_rx.data, self.rx.data)):
+            raise ValueError("frontend received data must match rx")
+        if not isinstance(self.range_doppler, RangeDopplerResult):
+            raise ValueError("range_doppler must be a RangeDopplerResult")
+        frames, channels = self.range_doppler.power_w.shape[:2]
+        if (frames, channels) != self.rx.data.shape[:3:2]:
+            raise ValueError("range_doppler frame and channel dimensions must match rx")
+        if len(self.cfar) != frames or any(len(row) != channels for row in self.cfar):
+            raise ValueError("cfar results must be nested by range-Doppler frame and channel")
+        for row in self.cfar:
+            for result in row:
+                if (not isinstance(result, CFARResult)
+                        or result.detections.shape != self.range_doppler.power_w.shape[-2:]):
+                    raise ValueError("CFAR result shape must match range-Doppler map")
+        if not all(isinstance(detection, Detection) for detection in self.detections):
+            raise ValueError("detections must contain Detection values")
+        if not all(isinstance(record, TruthRecord) for record in self.truth):
+            raise ValueError("truth must contain TruthRecord values")
