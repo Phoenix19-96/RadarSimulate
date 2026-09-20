@@ -20,6 +20,10 @@ print the detection count and artifact directory. Each creates its output only w
 run: `outputs/fmcw_example/` or `outputs/lfm_example/` by default. Set
 `RADARSIM_OUTPUT_ROOT` to write a one-off run elsewhere.
 
+Output directories are immutable: running an example again with the same
+destination raises `FileExistsError`. Choose a new `OUTPUT.experiment_name` or a
+new `RADARSIM_OUTPUT_ROOT` for each saved run.
+
 ## Configuration
 
 Edit `CONFIG` and `OUTPUT` directly in `configs/fmcw_example.py` or
@@ -29,6 +33,32 @@ no GUI, command-line configuration system, or external configuration format.
 
 Each target trajectory is piecewise-linear in Cartesian space. Waypoints may be
 entered in Cartesian or polar coordinates; RCS is constant for the full run.
+
+`range_window` applies only to FMCW; LFM always uses its waveform-matched pulse
+reference and ignores this setting. `range_fft_size` controls the FMCW delay-grid
+density and must be `None` for LFM (explicit LFM values are rejected).
+`doppler_window` and `doppler_fft_size` apply to both waveforms.
+
+FMCW matches the dechirped current and previous chirp branches coherently, with
+fast-time Doppler compensation and equal-energy gated references. Its supported
+range is limited by both IF sampling (`c * Fs / (4 * slope)`) and acquired delay
+support. When previous-chirp support bridges the acquisition gap, the latter
+limit is `c * repetition_interval / 2`; otherwise it is the range of the last
+acquired fast-time sample. The first chirp has no artificial transmit prehistory.
+Acquisition-limited grids use range-cell centers, so the zero and repetition
+endpoints cannot represent the same cell. Increasing `range_fft_size` makes the
+grid denser without improving the nominal `c / (2 * bandwidth)` resolution.
+
+LFM matches the continuous receive record across adjacent PRI/frame boundaries
+and assigns each nonnegative delay to its original transmitted pulse. A final
+echo without a complete recorded reference span contributes zero; a single-pulse
+frame exposes only range gates with complete support. The usual multi-pulse
+range limit remains `c * PRI / 2`.
+
+Scenes at or beyond the supported range produce a warning before Tx allocation;
+their output may alias or contain no acquired echo. Small supported range maps
+may require smaller CFAR windows. Single-sample inputs are degenerate processing
+cases and cannot provide a resolved range or velocity estimate.
 
 ## Coordinates
 
@@ -62,6 +92,12 @@ Every example writes exactly these seven diagnostic artifacts:
 - `range_profile.png` — maximum-over-Doppler range profile
 - `range_doppler.png` — range-Doppler power map
 - `cfar_map.png` — CFAR detection map
+
+Plots and `power_w` report uncalibrated processing-domain power, including
+matched-filter/window and coherent Doppler gains. The dBW scale is relative to
+one watt in these processing arrays; it is not a calibrated receiver-input power
+estimate and should not be compared across processing settings without gain
+correction.
 
 ## Testing
 

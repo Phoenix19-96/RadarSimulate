@@ -25,6 +25,12 @@ def _validate_received_cube(cube, frame_count, slow_count, fast_count,
         raise ValueError(f"{name} fast_time_s does not match waveform")
     if not np.allclose(cube.slow_time_s, expected_slow, rtol=0.0, atol=1e-15):
         raise ValueError(f"{name} slow_time_s does not match waveform")
+    expected_times = (
+        np.arange(frame_count)[:, None, None] * (slow_count * repetition_s)
+        + expected_slow[None, :, None] + expected_fast[None, None, :]
+    )
+    if not np.allclose(cube.sample_times_s, expected_times, rtol=0.0, atol=1e-15):
+        raise ValueError(f"{name} sample_times_s does not match waveform")
 
 
 def _validate_metadata(metadata, expected, name):
@@ -38,6 +44,47 @@ def _fft_size(configured, required, name):
     if size < required:
         raise ValueError(f"{name} must be at least {required}")
     return size
+
+
+def _fmcw_acquisition_delay_s(waveform):
+    count = round(waveform.chirp_duration_s * waveform.sample_rate_hz)
+    last_sample = (count - 1) / waveform.sample_rate_hz
+    previous_available = waveform.chirps_per_frame * waveform.frame_count > 1
+    # Current-chirp delays extend through the last acquired sample. Previous
+    # chirps fill the rest of [0,T) only if their support overlaps that interval.
+    if (previous_available and waveform.chirp_repetition_interval_s
+            - waveform.chirp_duration_s <= last_sample):
+        return waveform.chirp_repetition_interval_s
+    # Preserve the one-sample processor's degenerate zero-range cell.
+    return last_sample if count > 1 else waveform.chirp_duration_s
+
+
+def _fmcw_max_delay_s(waveform):
+    return min(waveform.sample_rate_hz / (2 * waveform.slope_hz_per_s),
+               _fmcw_acquisition_delay_s(waveform))
+
+
+def _fmcw_delay_grid(waveform, range_size):
+    acquisition_limit = _fmcw_acquisition_delay_s(waveform)
+    if _fmcw_max_delay_s(waveform) == acquisition_limit:
+        # Cell centers cover both ends of the acquired delay interval. For a
+        # periodic interval a zero bin would own half the far-end range cell.
+        step = waveform.sample_rate_hz / (range_size * waveform.slope_hz_per_s)
+        count = max(1, int(np.ceil(acquisition_limit / step)))
+        return (np.arange(count) + 0.5) * acquisition_limit / count
+    frequencies = np.fft.fftfreq(range_size, 1 / waveform.sample_rate_hz)
+    delays = np.sort(-frequencies[frequencies <= 0] / waveform.slope_hz_per_s)
+    # Nyquist is a usable discrete bin; the acquisition/repetition endpoint
+    # either has no current support or repeats zero delay and is excluded.
+    return delays[delays < acquisition_limit]
+
+
+def _fmcw_delay_kernel(reference, active, window):
+    kernel = np.conj(reference) * active * window[None, :]
+    energy = np.sum(np.abs(kernel) ** 2, axis=-1, keepdims=True)
+    scale = np.sqrt(np.divide(np.sum(window**2), energy,
+                              out=np.zeros_like(energy), where=energy > 0))
+    return kernel * scale
 
 
 def _slow_time_fft(range_data, radar, repetition_s, window_name, fft_size):
@@ -78,22 +125,37 @@ def process_fmcw(beat, radar, waveform, processing):
         processing.range_fft_size, fast_count, "range_fft_size"
     )
     window = get_window(processing.range_window, fast_count)
-    fast_spectrum = np.fft.fft(
-        beat.data * window[None, None, None, :], n=range_size, axis=-1
-    )
-    frequencies = np.fft.fftfreq(range_size, 1 / waveform.sample_rate_hz)
-    keep = frequencies <= 0
-    ranges = -frequencies[keep] * C_MPS / (2 * waveform.slope_hz_per_s)
-    order = np.argsort(ranges)
-    range_data = fast_spectrum[..., keep][..., order]
-    ranges = ranges[order]
-    spectrum, velocity = _slow_time_fft(
-        range_data,
+    delays = _fmcw_delay_grid(waveform, range_size)
+    fast = beat.fast_time_s[None, :]
+    delayed = fast - delays[:, None]
+    previous = delayed < 0
+    local = np.where(previous, delayed + waveform.chirp_repetition_interval_s, delayed)
+    active = (local >= 0) & (local < waveform.chirp_duration_s)
+    # Match both -S*tau (current) and +S*(T-tau) (previous) beat branches
+    # coherently, including their relative phase and active envelopes. This
+    # generalizes the windowed range transform on the configured FFT grid.
+    reference = np.exp(1j * np.pi * waveform.slope_hz_per_s * (local**2 - fast**2))
+    kernel = _fmcw_delay_kernel(reference, active, window)
+    doppler_data, velocity = _slow_time_fft(
+        beat.data,
         radar,
         waveform.chirp_repetition_interval_s,
         processing.doppler_window,
         processing.doppler_fft_size,
     )
+    # Transform order commutes. Matching after slow FFT lets us remove each
+    # Doppler bin's fast-time phase, preventing small near-zero range beats
+    # from changing sign and wrapping to the far range boundary.
+    doppler_hz = -2 * velocity / radar.wavelength_m
+    correction = np.exp(-2j * np.pi * doppler_hz[:, None] * fast)
+    spectrum = np.einsum("fcvt,vt,rt->fcvr", doppler_data, correction, kernel)
+    # No transmitted chirp exists before the first absolute receive record.
+    first_weight = get_window(processing.doppler_window, waveform.chirps_per_frame)[0]
+    first_kernel = _fmcw_delay_kernel(reference, active & ~previous, window)
+    spectrum[0] -= first_weight * np.einsum(
+        "ct,vt,rt->cvr", beat.data[0, 0], correction, kernel - first_kernel,
+    )
+    ranges = delays * C_MPS / 2
     range_resolution = C_MPS / (2 * waveform.bandwidth_hz)
     velocity_resolution = (np.inf if waveform.chirps_per_frame == 1 else radar.wavelength_m / (
         2 * waveform.chirps_per_frame * waveform.chirp_repetition_interval_s
@@ -105,12 +167,14 @@ def process_fmcw(beat, radar, waveform, processing):
         velocity,
         range_resolution,
         velocity_resolution,
-        C_MPS * waveform.sample_rate_hz / (4 * waveform.slope_hz_per_s),
+        C_MPS * _fmcw_max_delay_s(waveform) / 2,
         radar.wavelength_m / (4 * waveform.chirp_repetition_interval_s),
     )
 
 
 def process_lfm(frontend, radar, waveform, processing):
+    if processing.range_fft_size is not None:
+        raise ValueError("range_fft_size is inapplicable to LFM matched filtering")
     rx = frontend.received
     frames, slow, channels, fast = rx.data.shape
     if rx.metadata.get("waveform_kind") != "lfm":
@@ -131,25 +195,22 @@ def process_lfm(frontend, radar, waveform, processing):
     expected_reference = np.conj(LFMWaveform(waveform).reference()[::-1])
     if reference_size != expected_reference.size or not np.allclose(frontend.matched_filter_reference, expected_reference, rtol=1e-12, atol=1e-15):
         raise ValueError("LFM matched_filter_reference does not match waveform")
-    compressed = np.empty(
-        (frames, slow, channels, fast + reference_size - 1), complex
+    # Convolve each receiver's continuous record. A matched output at absolute
+    # delay pulse_start + delay belongs to that transmitted pulse, even when
+    # its receive tail ends in the following PRI/frame. Valid convolution
+    # excludes unobserved final tails; no prehistory or final padding is used.
+    continuous = rx.data.transpose(2, 0, 1, 3).reshape(channels, -1)
+    observed = fftconvolve(
+        continuous, frontend.matched_filter_reference[None, :],
+        mode="valid", axes=-1,
     )
-    for frame in range(frames):
-        for pulse in range(slow):
-            for channel in range(channels):
-                compressed[frame, pulse, channel] = fftconvolve(
-                    rx.data[frame, pulse, channel],
-                    frontend.matched_filter_reference,
-                    mode="full",
-                )
-    delay_samples = np.arange(compressed.shape[-1]) - (reference_size - 1)
-    valid = (delay_samples >= 0) & (
-        delay_samples / waveform.sample_rate_hz
-        < waveform.pulse_repetition_interval_s
-    )
-    ranges = delay_samples[valid] / waveform.sample_rate_hz * C_MPS / 2
+    compressed = np.zeros_like(continuous)
+    compressed[:, :observed.shape[-1]] = observed
+    compressed = compressed.reshape(channels, frames, slow, fast).transpose(1, 2, 0, 3)
+    range_count = fast if slow > 1 else fast - reference_size + 1
+    ranges = np.arange(range_count) / waveform.sample_rate_hz * C_MPS / 2
     spectrum, velocity = _slow_time_fft(
-        compressed[..., valid],
+        compressed[..., :range_count],
         radar,
         waveform.pulse_repetition_interval_s,
         processing.doppler_window,
@@ -163,6 +224,6 @@ def process_lfm(frontend, radar, waveform, processing):
         C_MPS / (2 * waveform.bandwidth_hz),
         (np.inf if waveform.pulses_per_frame == 1 else radar.wavelength_m
          / (2 * waveform.pulses_per_frame * waveform.pulse_repetition_interval_s)),
-        C_MPS * waveform.pulse_repetition_interval_s / 2,
+        C_MPS * range_count / (2 * waveform.sample_rate_hz),
         radar.wavelength_m / (4 * waveform.pulse_repetition_interval_s),
     )

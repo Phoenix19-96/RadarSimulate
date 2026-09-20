@@ -7,11 +7,14 @@ import numpy as np
 
 from .channel import MonostaticChannel
 from .config import NoiseConfig, ProcessingConfig, RadarConfig
+from .constants import C_MPS
 from .frontend import dechirp_fmcw, prepare_lfm
 from .geometry import cartesian_to_polar, radial_velocity
 from .models import SimulationResult, TruthRecord
 from .processing.cfar import ca_cfar_2d, extract_detections
-from .processing.range_doppler import process_fmcw, process_lfm
+from .processing.range_doppler import (
+    _fmcw_delay_grid, _fmcw_max_delay_s, process_fmcw, process_lfm,
+)
 from .scene import Target
 from .waveforms.fmcw import FMCWConfig, FMCWWaveform
 from .waveforms.lfm import LFMConfig, LFMWaveform
@@ -63,13 +66,16 @@ def _validate_processing(
             fast_count if processing.range_fft_size is None
             else processing.range_fft_size
         )
-        range_bins = range_fft_size // 2 + 1
     else:
+        if processing.range_fft_size is not None:
+            raise ValueError("range_fft_size is inapplicable to LFM matched filtering")
         fast_count = round(
             waveform.config.pulse_repetition_interval_s * waveform.sample_rate_hz
         )
         range_fft_size = fast_count
-        range_bins = fast_count
+        range_bins = fast_count if waveform.slow_time_count > 1 else (
+            fast_count - waveform.reference().size + 1
+        )
     doppler_fft_size = (
         waveform.slow_time_count if processing.doppler_fft_size is None
         else processing.doppler_fft_size
@@ -80,6 +86,8 @@ def _validate_processing(
     ):
         if type(value) is not int or value < minimum:
             raise ValueError(f"{name} must be at least {minimum}")
+    if isinstance(waveform, FMCWWaveform):
+        range_bins = len(_fmcw_delay_grid(waveform.config, range_fft_size))
     train_doppler, train_range = processing.cfar.training_cells
     guard_doppler, guard_range = processing.cfar.guard_cells
     if (doppler_fft_size <= 2 * (train_doppler + guard_doppler)
@@ -89,7 +97,7 @@ def _validate_processing(
 
 def _validate_trajectory_coverage(
     config: ExperimentConfig, waveform: FMCWWaveform | LFMWaveform,
-) -> None:
+) -> float:
     if isinstance(waveform, FMCWWaveform):
         fast_count = round(
             waveform.config.chirp_duration_s * waveform.sample_rate_hz
@@ -114,6 +122,31 @@ def _validate_trajectory_coverage(
             raise ValueError(
                 "trajectory coverage must include simulation samples and truth times"
             )
+    return sample_end_s
+
+
+def _warn_for_range_ambiguity(config: ExperimentConfig, sample_end_s: float) -> None:
+    waveform = config.waveform
+    if isinstance(waveform, FMCWConfig):
+        max_delay = _fmcw_max_delay_s(waveform)
+    else:
+        max_delay = waveform.pulse_repetition_interval_s
+        if waveform.pulses_per_frame == 1:
+            max_delay -= waveform.pulse_width_s - 1 / waveform.sample_rate_hz
+    max_range = C_MPS * max_delay / 2
+    radar_position = np.asarray(config.radar.position_m)
+    for target in config.targets:
+        # Norm is convex on each linear trajectory segment: its endpoints
+        # and interior waypoints bound the whole sampled acquisition.
+        times = target.trajectory.times_s
+        times = np.concatenate(([0.0], times[(times > 0) & (times < sample_end_s)], [sample_end_s]))
+        positions, _ = target.trajectory.states_at(times)
+        if np.any(np.linalg.norm(positions - radar_position, axis=-1) >= max_range):
+            warnings.warn(
+                f"target range reaches/exceeds supported maximum unambiguous range ({max_range:g} m); results may alias or contain no acquired echo",
+                RuntimeWarning, stacklevel=2,
+            )
+            return
 
 
 def _validate_fmcw_metadata(rx, tx, waveform: FMCWWaveform) -> None:
@@ -207,11 +240,6 @@ def _truth_records(config: ExperimentConfig, tx) -> tuple[TruthRecord, ...]:
 
 
 def _warn_for_ambiguity(truth: tuple[TruthRecord, ...], range_doppler) -> None:
-    if any(record.range_m > range_doppler.max_unambiguous_range_m for record in truth):
-        warnings.warn(
-            "target range exceeds maximum unambiguous range", RuntimeWarning,
-            stacklevel=2,
-        )
     if any(
         abs(record.radial_velocity_mps)
         > range_doppler.max_unambiguous_velocity_mps
@@ -229,9 +257,10 @@ def run_simulation(config: ExperimentConfig) -> SimulationResult:
         raise TypeError("config must be an ExperimentConfig")
     waveform = _waveform(config.waveform)
     _validate_processing(waveform, config.processing)
-    _validate_trajectory_coverage(config, waveform)
+    sample_end_s = _validate_trajectory_coverage(config, waveform)
     _validate_unique_target_ids(config.targets)
     _validate_noise_power(config.noise)
+    _warn_for_range_ambiguity(config, sample_end_s)
     tx = waveform.build_tx(config.radar)
     rx = MonostaticChannel().propagate(
         tx, waveform, config.radar, config.targets, config.noise,

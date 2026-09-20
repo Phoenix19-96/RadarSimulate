@@ -90,7 +90,7 @@ def _save_plots(directory: Path, result: SimulationResult) -> None:
     fig, axis = plt.subplots()
     try:
         axis.plot(range_doppler.range_m, _db(power_w.max(axis=0)))
-        axis.set(xlabel="Range (m)", ylabel="Power (dBW)", title="Range profile")
+        axis.set(xlabel="Range (m)", ylabel="Processing power (dBW, uncalibrated)", title="Range profile")
         fig.tight_layout()
         fig.savefig(directory / "range_profile.png", dpi=150)
     finally:
@@ -106,7 +106,7 @@ def _save_plots(directory: Path, result: SimulationResult) -> None:
             xlabel="Range (m)", ylabel="Radial velocity (m/s)",
             title="Range-Doppler map",
         )
-        fig.colorbar(image, ax=axis, label="Power (dBW)")
+        fig.colorbar(image, ax=axis, label="Processing power (dBW, uncalibrated)")
         fig.tight_layout()
         fig.savefig(directory / "range_doppler.png", dpi=150)
     finally:

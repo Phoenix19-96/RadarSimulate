@@ -88,6 +88,12 @@ class CFARConfig:
 
 @dataclass(frozen=True)
 class ProcessingConfig:
+    """Range window/grid settings are FMCW-only; LFM requires range_fft_size=None.
+
+    LFM ignores range_window and uses the waveform-matched pulse reference.
+    Both waveforms use the configured Doppler window and FFT size.
+    """
+
     range_window: Literal["hann", "hamming", "blackman", "boxcar"] = "hann"
     doppler_window: Literal["hann", "hamming", "blackman", "boxcar"] = "hann"
     range_fft_size: int | None = None
